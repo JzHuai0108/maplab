@@ -11,7 +11,7 @@ if [[ ! -d "$MAPLAB_WS" ]]; then
   echo "$MAPLAB_WS does not exist!"
   exit 2 
 fi
-
+cd $MAPLAB_WS
 CMD="catkin build opencv3_catkin"
 n=0
 until [ $n -ge 20 ]
