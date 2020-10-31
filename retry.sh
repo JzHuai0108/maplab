@@ -1,18 +1,29 @@
 #!/bin/bash
-# Build maplab package in a low bandwidth environment.
-# opencv3_catkin and suitesparse are esp. vulnerable to low bandwidth.
-# often times, it is due to the error "Failed to connect to 
-# raw.githubusercontent.com port 443: Connection refused". In this case,
-# try this: open /etc/hosts, append the following line,
+# Build maplab package in a low bandwidth network.
+# We build separately opencv3_catkin and suitesparse which are esp. vulnerable to low bandwidth.
+
+# Troubleshooting
+# 1. Network issue in building opencv3_catkin, "Failed to connect to 
+# raw.githubusercontent.com port 443: Connection refused".
+
+# One approach to resolve the issue is: open /etc/hosts, append the below line,
 # 199.232.28.133 raw.githubusercontent.com
 # see https://blog.csdn.net/CharlesYooSky/article/details/106354746
 
-# maplab simulation package depends on orocos_kdl, you may need to install it with
+# An better approach is to register for a VPN service 
+# which enables tunneling in a Linux terminal.
+
+# 2. "No rule to make target '/opt/ros/kinetic/lib/liborocos-kdl.so.1.3.X'"
+# This happens because the catkin compiler cannot locate 1.3.X though 
+# it is very likely 1.3.0 or 1.3 can be located under /opt/ros/kinetic/lib.
+# One approach is to be sure that liborocos has been installed, you may install it with
 # apt-get update
 # apt-get install ros-kinetic-orocos-kdl
-# If the problem "No rule to make target '/opt/ros/kinetic/lib/liborocos-kdl.so.1.3.0'"
-# persist after installation, you may have to cheat a bit as below,
-# ln -s /opt/ros/kinetic/lib/liborocos-kdl.so.1.3 /opt/ros/kinetic/lib/liborocos-kdl.so.1.3.0
+# If the problem persists, you may have to hoax the compiler as below,
+# ln -s /opt/ros/kinetic/lib/liborocos-kdl.so.1.3 /opt/ros/kinetic/lib/liborocos-kdl.so.1.3.X
+
+# An alternative approach is from a [CSDN blog](https://blog.csdn.net/moyu123456789/article/details/106421754)
+# where the liborocos is built from source and upgraded to 1.3.2.
 
 if [[ $# -ne 1 ]]; then
     echo "Usage: $0 </path/to/maplab_ws>" 

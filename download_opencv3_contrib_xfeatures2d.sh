@@ -68,15 +68,3 @@ else
   echo "Finished downloading $EXPECTED_FILES vgg and boostdesc files!"
   exit 0
 fi
-
-
-# TODO(jhuai): tiny-dnn
-# "https://github.com/tiny-dnn/tiny-dnn/archive/v1.0.0a3.tar.gz" 
-# "/baselines/maplab_bespoke_ws/build/opencv3_catkin/opencv3_src/build/3rdparty/tinydnn"
-
-# TODO(jhuai): Download ippicv
-# DESTINATION_DIR /jhuai/baselines/maplab_bespoke_ws/build/opencv3_catkin/opencv3_src/build/3rdparty/ippicv
-# cmake_download "/baselines/maplab_bespoke_ws/build/opencv3_catkin/opencv3_src/.cache/ippicv/4e0352ce96473837b1d671ce87f17359-ippicv_2017u3_lnx_intel64_general_20170822.tgz" 
-# "https://raw.githubusercontent.com/opencv/opencv_3rdparty/dfe3162c237af211e98b8960018b564bc209261d/ippicv/ippicv_2017u3_lnx_intel64_general_20170822.tgz"
-
-
