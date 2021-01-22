@@ -3,6 +3,7 @@
 #include <aslam/common/timer.h>
 #include <ceres/ceres.h>
 #include <gflags/gflags.h>
+#include <maplab-common/parallel-process.h>
 
 DEFINE_int32(
     ba_outlier_rejection_reject_every_n_iters, 3,
@@ -19,6 +20,10 @@ DEFINE_double(
     ba_outlier_rejection_reprojection_error_other_mission_px, 400,
     "Reprojection error threshold in pixels for observations from missions"
     "the landmark is NOT stored in.");
+DEFINE_bool(
+    ba_hide_iterations_console_output, false,
+    "Define whether iterations should have output on verbosity level 0 or "
+    "not.");
 
 namespace map_optimization {
 
@@ -43,11 +48,11 @@ double computeSquaredReprojectionError(
 }
 
 void findOutlierLandmarks(
-    const vi_map::VIMap& map, const vi_map::LandmarkIdSet& landmarks_in_problem,
+    const vi_map::VIMap& map, const vi_map::LandmarkIdSet& landmark_ids_set,
     const bool use_reprojection_error,
     const double same_mission_reprojection_error_px,
     const double other_mission_reprojection_error_px,
-    vi_map::LandmarkIdSet* outlier_landmarks) {
+    vi_map::LandmarkIdList* outlier_landmarks) {
   CHECK_NOTNULL(outlier_landmarks)->clear();
 
   const double same_mission_reproj_error_px_sq =
@@ -55,62 +60,87 @@ void findOutlierLandmarks(
   const double other_mission_reproj_error_px_sq =
       other_mission_reprojection_error_px * other_mission_reprojection_error_px;
 
-  for (const vi_map::LandmarkId& landmark_id : landmarks_in_problem) {
-    const vi_map::Landmark& landmark = map.getLandmark(landmark_id);
+  vi_map::LandmarkIdList landmark_ids(
+      landmark_ids_set.begin(), landmark_ids_set.end());
 
-    const vi_map::MissionId& landmark_store_mission_id =
-        map.getLandmarkStoreVertex(landmark_id).getMissionId();
+  std::mutex outlier_landmarks_mutex;
+  std::function<void(const std::vector<size_t>&)> process_landmark =
+      [&](const std::vector<size_t>& batch) {
+        vi_map::LandmarkIdList local_outlier_landmarks;
+        for (size_t item : batch) {
+          const vi_map::LandmarkId& landmark_id = landmark_ids[item];
+          const vi_map::Landmark& landmark = map.getLandmark(landmark_id);
 
-    landmark.forEachObservation(
-        [&](const vi_map::KeypointIdentifier& keypoint_id) {
-          const vi_map::Vertex& observer_vertex =
-              map.getVertex(keypoint_id.frame_id.vertex_id);
+          const vi_map::MissionId& landmark_store_mission_id =
+              map.getLandmarkStoreVertex(landmark_id).getMissionId();
 
-          const int frame_idx = keypoint_id.frame_id.frame_index;
-          CHECK(observer_vertex.isVisualFrameSet(frame_idx));
-          CHECK(observer_vertex.isVisualFrameValid(frame_idx));
+          // Iterate over all the observations
+          const vi_map::KeypointIdentifierList& keypoint_ids =
+              landmark.getObservations();
+          for (const vi_map::KeypointIdentifier& keypoint_id : keypoint_ids) {
+            const vi_map::Vertex& observer_vertex =
+                map.getVertex(keypoint_id.frame_id.vertex_id);
 
-          CHECK_LT(
-              keypoint_id.keypoint_index,
-              observer_vertex.getVisualFrame(frame_idx)
-                  .getNumKeypointMeasurements());
+            const int frame_idx = keypoint_id.frame_id.frame_index;
+            CHECK(observer_vertex.isVisualFrameSet(frame_idx));
+            CHECK(observer_vertex.isVisualFrameValid(frame_idx));
 
-          const Eigen::Vector3d p_C_fi =
-              map.getLandmark_p_C_fi(landmark_id, observer_vertex, frame_idx);
+            CHECK_LT(
+                keypoint_id.keypoint_index,
+                observer_vertex.getVisualFrame(frame_idx)
+                    .getNumKeypointMeasurements());
 
-          if (p_C_fi[2] <= 0.0) {
-            outlier_landmarks->emplace(landmark_id);
-            return;
-          }
+            const Eigen::Vector3d& p_C_fi =
+                map.getLandmark_p_C_fi(landmark_id, observer_vertex, frame_idx);
 
-          if (use_reprojection_error) {
-            const double reprojection_error_sq =
-                computeSquaredReprojectionError(
-                    observer_vertex, frame_idx, keypoint_id.keypoint_index,
-                    p_C_fi);
-            if (observer_vertex.getMissionId() == landmark_store_mission_id &&
-                reprojection_error_sq > same_mission_reproj_error_px_sq) {
-              // The landmarks is in the same mission so we use the same
-              // mission reprojection error threshold.
-              outlier_landmarks->emplace(landmark_id);
-            } else if (
-                reprojection_error_sq > other_mission_reproj_error_px_sq) {
-              // The observation is coming from a different mission than the
-              // one where the landmark is stored.
-              outlier_landmarks->emplace(landmark_id);
+            if (p_C_fi[2] <= 0.0) {
+              local_outlier_landmarks.emplace_back(landmark_id);
+              break;
+            }
+
+            if (use_reprojection_error) {
+              const double reprojection_error_sq =
+                  computeSquaredReprojectionError(
+                      observer_vertex, frame_idx, keypoint_id.keypoint_index,
+                      p_C_fi);
+              if (observer_vertex.getMissionId() == landmark_store_mission_id &&
+                  reprojection_error_sq > same_mission_reproj_error_px_sq) {
+                // The landmarks is in the same mission so we use the same
+                // mission reprojection error threshold.
+                local_outlier_landmarks.emplace_back(landmark_id);
+                break;
+              } else if (
+                  reprojection_error_sq > other_mission_reproj_error_px_sq) {
+                // The observation is coming from a different mission than the
+                // one where the landmark is stored.
+                local_outlier_landmarks.emplace_back(landmark_id);
+                break;
+              }
             }
           }
-        });
-  }
+        }
+
+        {
+          std::lock_guard<std::mutex> lock(outlier_landmarks_mutex);
+          outlier_landmarks->insert(
+              outlier_landmarks->end(), local_outlier_landmarks.begin(),
+              local_outlier_landmarks.end());
+        }
+      };
+
+  constexpr bool kAlwaysParallelize = true;
+  const size_t num_threads = common::getNumHardwareThreads();
+  common::ParallelProcess(
+      landmark_ids.size(), process_landmark, kAlwaysParallelize, num_threads);
 }
 
 ceres::TerminationType solveStep(
-    const OutlierRejectionSolverOptions& rejection_options,
-    const ceres::Solver::Options& solver_options,
+    const ceres::Solver::Options& solver_options, int num_iters,
     OptimizationProblem* optimization_problem,
-    OutlierRejectionCallback* callback) {
+    OutlierRejectionCallback* callback, OptimizationProblemResult* result) {
   CHECK_NOTNULL(optimization_problem);
   CHECK_NOTNULL(callback);
+  // 'result' can be a nullptr.
 
   ceres::Problem problem(ceres_error_terms::getDefaultProblemOptions());
   ceres_error_terms::buildCeresProblemFromProblemInformation(
@@ -118,19 +148,25 @@ ceres::TerminationType solveStep(
 
   ceres::Solver::Options local_options = solver_options;
   local_options.callbacks.push_back(callback);
+
   // Reusing the trust region size from the last iteration.
-  local_options.initial_trust_region_radius =
-      callback->initial_trust_region_radius_;
+  if (!callback->iteration_summaries_.empty()) {
+    local_options.initial_trust_region_radius =
+        callback->iteration_summaries_.back().trust_region_radius;
+  }
 
   // Disable the default Ceres output.
   local_options.minimizer_progress_to_stdout = false;
-  local_options.max_num_iterations =
-      rejection_options.reject_outliers_every_n_iters;
+  local_options.max_num_iterations = num_iters;
   local_options.update_state_every_iteration = true;
 
   ceres::Solver::Summary summary;
   ceres::Solve(local_options, &problem, &summary);
 
+  // Save the solver summary of each iteration.
+  if (result != nullptr) {
+    result->solver_summaries.emplace_back(summary);
+  }
   return summary.termination_type;
 }
 
@@ -155,7 +191,7 @@ void rejectOutliers(
         return key_elem.first;
       });
 
-  vi_map::LandmarkIdSet outlier_landmarks;
+  vi_map::LandmarkIdList outlier_landmarks;
   findOutlierLandmarks(
       map, present_landmarks,
       rejection_options.reject_landmarks_based_on_reprojection_errors,
@@ -198,7 +234,18 @@ ceres::TerminationType solveWithOutlierRejection(
     const ceres::Solver::Options& solver_options,
     const OutlierRejectionSolverOptions& rejection_options,
     OptimizationProblem* optimization_problem) {
+  return solveWithOutlierRejection(
+      solver_options, rejection_options, optimization_problem,
+      nullptr /*result*/);
+}
+
+ceres::TerminationType solveWithOutlierRejection(
+    const ceres::Solver::Options& solver_options,
+    const OutlierRejectionSolverOptions& rejection_options,
+    OptimizationProblem* optimization_problem,
+    OptimizationProblemResult* result) {
   CHECK_NOTNULL(optimization_problem);
+  // 'result' can be a nullptr.
 
   if (rejection_options.reject_outliers_every_n_iters == 0 ||
       solver_options.max_num_iterations == 0) {
@@ -206,21 +253,21 @@ ceres::TerminationType solveWithOutlierRejection(
     return ceres::TerminationType::FAILURE;
   }
 
-  // Integer ceil division.
-  const int num_outer_iters =
-      (solver_options.max_num_iterations +
-       rejection_options.reject_outliers_every_n_iters - 1) /
-      rejection_options.reject_outliers_every_n_iters;
-
   OutlierRejectionCallback callback(solver_options.initial_trust_region_radius);
 
   ceres::TerminationType termination_type =
       ceres::TerminationType::NO_CONVERGENCE;
-  for (int i = 0; i < num_outer_iters; ++i) {
+  int num_iters_remaining = solver_options.max_num_iterations;
+  timing::TimerImpl timer_full_ba("BA: Full", true);
+  double max_solver_time_s = solver_options.max_solver_time_in_seconds;
+  while (num_iters_remaining > 0 && max_solver_time_s > 0) {
+    timer_full_ba.Start();
+    const int step_iters = std::min(
+        num_iters_remaining, rejection_options.reject_outliers_every_n_iters);
+
     timing::Timer timer_solve("BA: Solve");
     termination_type = solveStep(
-        rejection_options, solver_options, optimization_problem, &callback);
-    timer_solve.Stop();
+        solver_options, step_iters, optimization_problem, &callback, result);
 
     timing::Timer timer_copy("BA: CopyDataToMap");
     optimization_problem->getOptimizationStateBufferMutable()
@@ -234,6 +281,14 @@ ceres::TerminationType solveWithOutlierRejection(
     if (termination_type != ceres::TerminationType::NO_CONVERGENCE) {
       break;
     }
+
+    max_solver_time_s -= timer_full_ba.Stop();
+    num_iters_remaining -= step_iters;
+  }
+
+  // Save all iteration summaries.
+  if (result != nullptr) {
+    result->iteration_summaries = callback.iteration_summaries_;
   }
 
   return termination_type;

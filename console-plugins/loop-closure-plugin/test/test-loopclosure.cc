@@ -4,7 +4,8 @@
 #include <landmark-triangulation/landmark-triangulation.h>
 #include <loopclosure-common/flags.h>
 #include <loopclosure-common/types.h>
-#include <map-optimization-legacy-plugin/vi-map-optimizer-legacy.h>
+#include <map-optimization/solver-options.h>
+#include <map-optimization/vi-map-optimizer.h>
 #include <maplab-common/test/testing-entrypoint.h>
 #include <maplab-common/test/testing-predicates.h>
 #include <matching-based-loopclosure/detector-settings.h>
@@ -23,7 +24,7 @@ class LoopClosureAppTest : public ::testing::Test {
   virtual void SetUp() {
     FLAGS_lc_detector_engine =
         matching_based_loopclosure::kMatchingLDInvertedMultiIndexString;
-    FLAGS_feature_descriptor_type = loop_closure::kFeatureDescriptorFREAK;
+    FLAGS_feature_descriptor_type = loop_closure::kFeatureDescriptorBRISK;
     FLAGS_lc_scoring_function =
         matching_based_loopclosure::kProbabilisticString;
     FLAGS_lc_use_random_pnp_seed = false;
@@ -34,23 +35,33 @@ class LoopClosureAppTest : public ::testing::Test {
         new VIMapMerger(test_app_.getMapMutable(), kPlotterNullptr));
   }
 
-  bool optimize(ceres::Solver::Summary* summary);
+  bool optimize();
 
   visual_inertial_mapping::VIMappingTestApp test_app_;
   std::unique_ptr<VIMapMerger> map_merger_;
 };
 
-bool LoopClosureAppTest::optimize(ceres::Solver::Summary* summary) {
-  CHECK_NOTNULL(summary);
-  map_optimization_legacy::BaOptimizationOptions options;
-  options.num_iterations = 20;
-  options.include_loop_closure_edges = true;
-  options.include_visual = true;
-  options.include_inertial = true;
-
-  map_optimization_legacy_plugin::VIMapOptimizer optimizer;
+bool LoopClosureAppTest::optimize() {
   vi_map::VIMap* map = CHECK_NOTNULL(test_app_.getMapMutable());
-  return optimizer.optimize(options, map, summary) == common::kSuccess;
+
+  map_optimization::ViProblemOptions vi_problem_options =
+      map_optimization::ViProblemOptions::initFromGFlags();
+
+  vi_problem_options.solver_options.max_num_iterations = 20;
+  vi_problem_options.enable_visual_outlier_rejection = false;
+  vi_problem_options.add_loop_closure_edges = true;
+
+  // Initial visual-inertial optimization.
+  constexpr bool kEnableSignalHandler = true;
+  map_optimization::VIMapOptimizer optimizer(nullptr, kEnableSignalHandler);
+
+  // Optimize all missions in the map
+  vi_map::MissionIdSet all_mission_ids;
+  map->getAllMissionIds(&all_mission_ids);
+
+  const bool success =
+      optimizer.optimize(vi_problem_options, all_mission_ids, map);
+  return success;
 }
 
 TEST_F(LoopClosureAppTest, TestIsDatasetConsistent) {
@@ -86,8 +97,7 @@ TEST_F(LoopClosureAppTest, TestLoopClosureWithOptimization) {
 
   landmark_triangulation::retriangulateLandmarks(map_ptr);
   map_merger_->findLoopClosuresBetweenAllMissions();
-  ceres::Solver::Summary summary;
-  EXPECT_TRUE(optimize(&summary));
+  EXPECT_TRUE(optimize());
 
   const Eigen::Vector3d start_vertex_G_p_I =
       map_ptr->getVertex_G_p_I(start_vertex);

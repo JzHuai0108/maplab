@@ -14,17 +14,17 @@ PROTOBUF_CATKIN_GENERATE_CPP2("proto" PROTO_SRCS PROTO_HDRS ${PROTO_DEFNS})
 #############
 # LIBRARIES #
 #############
-add_definitions(-std=c++11)
-
 if(APPLE)
   add_definitions(-DGTEST_HAS_TR1_TUPLE=0)
 endif()
 SET(CMAKE_SHARED_LIBRARY_LINK_CXX_FLAGS "${CMAKE_SHARED_LIBRARY_LINK_CXX_FLAGS} -lpthread")
 
 cs_add_library(${PROJECT_NAME} ${PROTO_SRCS} ${PROTO_HDRS}
+  src/imu-forward-propagation.cc
   src/imu-measurements-buffer.cc
-  src/test/vio-update-simulation.cc
+  src/pose-lookup-buffer.cc
   src/rostopic-settings.cc
+  src/test/vio-update-simulation.cc
   src/vio-update-serialization.cc
 )
 

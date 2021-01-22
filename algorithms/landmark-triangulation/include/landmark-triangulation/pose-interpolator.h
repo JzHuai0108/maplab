@@ -34,6 +34,8 @@ struct StateLinearizationPoint {
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 };
 
+typedef std::unordered_map<pose_graph::VertexId, int64_t> VertexToTimeStampMap;
+
 class PoseInterpolator {
  public:
   // Returns interpolated poses for the mission specified by mission_id.
@@ -60,14 +62,21 @@ class PoseInterpolator {
   // Returns an empty map if there are no IMU measurements.
   void getVertexToTimeStampMap(
       const vi_map::VIMap& map, const vi_map::MissionId& mission_id,
-      std::unordered_map<pose_graph::VertexId, int64_t>* vertex_to_time_map)
-      const;
+      VertexToTimeStampMap* vertex_to_time_map,
+      int64_t* min_timestamp_ns = nullptr,
+      int64_t* max_timestamp_ns = nullptr) const;
+
+  // Returns a vector if vertex timestamps based on the first frame timestamp.
+  void getVertexTimeStampVector(
+      const vi_map::VIMap& map, const vi_map::MissionId& mission_id,
+      std::vector<int64_t>* vertex_timestamps_nanoseconds) const;
 
  private:
-  typedef std::pair<int64_t, StateLinearizationPoint> state_buffer_value_type;
+  typedef std::pair<const int64_t, StateLinearizationPoint>
+      state_buffer_value_type;
   typedef common::TemporalBuffer<
       StateLinearizationPoint,
-      Eigen::aligned_allocator<state_buffer_value_type> >
+      Eigen::aligned_allocator<state_buffer_value_type>>
       StateBuffer;
 
   // Determine the earliest and latest IMU measurements across an entire

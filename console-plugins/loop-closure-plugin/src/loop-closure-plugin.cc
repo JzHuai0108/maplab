@@ -1,6 +1,7 @@
 #include "loop-closure-plugin/loop-closure-plugin.h"
 
 #include <console-common/console.h>
+#include <descriptor-projection/train-projection-matrix.h>
 #include <map-manager/map-manager.h>
 #include <posegraph/pose-graph.h>
 #include <posegraph/unique-id.h>
@@ -49,6 +50,26 @@ LoopClosurePlugin::LoopClosurePlugin(
       common::Processing::Sync);
 
   addCommand(
+      {"train_projection_matrix"},
+      [this]() -> int {
+        std::string selected_map_key;
+        if (!getSelectedMapKeyIfSet(&selected_map_key)) {
+          return common::kStupidUserError;
+        }
+        vi_map::VIMapManager map_manager;
+        vi_map::VIMapManager::MapWriteAccess map =
+            map_manager.getMapWriteAccess(selected_map_key);
+
+        descriptor_projection::TrainProjectionMatrix(*map);
+
+        return common::kSuccess;
+      },
+      "Train a new descriptor projection matrix based on the selected map. Use "
+      "--lc_projection_matrix_filename to specify the target file for the "
+      "projecton matrix.",
+      common::Processing::Sync);
+
+  addCommand(
       {"eloc", "evaluate_localization"},
       [this]() -> int { return evaluateLocalization(); },
       "Evaluation localization between a query and database missions. "
@@ -84,7 +105,7 @@ int LoopClosurePlugin::findLoopClosuresBetweenAllMissions() const {
     return common::kStupidUserError;
   }
 
-  VIMapMerger merger(map.get(), plotter_);
+  VIMapMerger merger(map.get(), getPlotterUnsafe());
   return merger.findLoopClosuresBetweenAllMissions();
 }
 
@@ -113,7 +134,7 @@ int LoopClosurePlugin::findLoopClosuresInOneMission() const {
   map->ensureMissionIdValid(FLAGS_map_mission, &mission_id);
   mission_ids.emplace_back(mission_id);
 
-  VIMapMerger merger(map.get(), plotter_);
+  VIMapMerger merger(map.get(), getPlotterUnsafe());
   return merger.findLoopClosuresBetweenMissions(mission_ids);
 }
 
@@ -166,7 +187,7 @@ int LoopClosurePlugin::alignMissionsForEvaluation() const {
     return common::kUnknownError;
   }
 
-  VILocalizationEvaluator evaluator(map.get(), plotter_);
+  VILocalizationEvaluator evaluator(map.get(), getPlotterUnsafe());
   evaluator.alignMissionsForEvaluation(query_mission_id);
 
   return common::kSuccess;
@@ -190,7 +211,7 @@ int LoopClosurePlugin::evaluateLocalization() const {
     return common::kUnknownError;
   }
 
-  VILocalizationEvaluator evaluator(map.get(), plotter_);
+  VILocalizationEvaluator evaluator(map.get(), getPlotterUnsafe());
   evaluator.evaluateLocalizationPerformance(query_mission_id);
 
   return common::kSuccess;

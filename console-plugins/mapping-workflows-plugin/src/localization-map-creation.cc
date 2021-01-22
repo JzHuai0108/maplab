@@ -61,22 +61,23 @@ int processVIMapToLocalizationMap(
 
   // Evaluate the quality of landmarks after keyframing the map.
   FLAGS_vi_map_landmark_quality_min_observers = 2;
-  vi_map_helpers::evaluateLandmarkQuality(map);
+  vi_map_helpers::evaluateLandmarkQuality(mission_ids, map);
 
   // Common options for the subsequent optimizations.
-  ceres::Solver::Options solver_options =
-      map_optimization::initSolverOptionsFromFlags();
   constexpr bool kEnableSignalHandler = true;
   map_optimization::VIMapOptimizer optimizer(plotter, kEnableSignalHandler);
+
   map_optimization::ViProblemOptions vi_problem_options =
       map_optimization::ViProblemOptions::initFromGFlags();
 
-  constexpr int kNumInitialOptviIterations = 3;
-  solver_options.max_num_iterations = kNumInitialOptviIterations;
+  vi_problem_options.enable_visual_outlier_rejection = false;
+
+  constexpr int kNumInitialInitOptimizationIterations = 10;
+  vi_problem_options.solver_options.max_num_iterations =
+      kNumInitialInitOptimizationIterations;
 
   // Initial visual-inertial optimization.
-  bool success = optimizer.optimizeVisualInertial(
-      vi_problem_options, solver_options, {mission_id}, nullptr, map);
+  bool success = optimizer.optimize(vi_problem_options, {mission_id}, map);
   if (!success) {
     LOG(ERROR) << "Optimization failed! Aborting.";
     return common::CommandStatus::kUnknownError;
@@ -85,12 +86,14 @@ int processVIMapToLocalizationMap(
   // Overwrite the number of iterations to a reasonable value.
   // TODO(dymczykm) A temporary solution for the optimization not to take too
   // long. Better termination conditions are necessary.
-  constexpr int kMaxNumIterations = 10;
-  solver_options.max_num_iterations = kMaxNumIterations;
+  constexpr int kMaxNumRelaxationIterations = 10;
+  vi_problem_options.solver_options.max_num_iterations =
+      kMaxNumRelaxationIterations;
 
   // Relax the map.
   map_optimization::VIMapRelaxation relaxation(plotter, kEnableSignalHandler);
-  success = relaxation.relax(solver_options, {mission_id}, map);
+  success = relaxation.findLoopClosuresAndSolveRelaxation(
+      vi_problem_options.solver_options, {mission_id}, map);
   if (!success) {
     LOG(WARNING) << "Pose-graph relaxation failed, but this might be fine if "
                  << "no loopclosures are present in the dataset.";
@@ -105,8 +108,11 @@ int processVIMapToLocalizationMap(
   }
 
   // Optimize the map.
-  success = optimizer.optimizeVisualInertial(
-      vi_problem_options, solver_options, {mission_id}, nullptr, map);
+  constexpr int kMaxNumOptimizationIterations = 25;
+  vi_problem_options.solver_options.max_num_iterations =
+      kMaxNumOptimizationIterations;
+
+  success = optimizer.optimize(vi_problem_options, {mission_id}, map);
   if (!success) {
     LOG(ERROR) << "Optimization failed! Aborting.";
     return common::CommandStatus::kUnknownError;

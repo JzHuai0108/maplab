@@ -1,139 +1,135 @@
 #!/usr/bin/env python
 
-import math
+from __future__ import print_function
+
+import bisect
 import os
 
 import numpy as np
 
+from hand_eye_calibration.dual_quaternion import DualQuaternion
+from hand_eye_calibration.extrinsic_calibration import ExtrinsicCalibration
 from hand_eye_calibration.quaternion import Quaternion
 import hand_eye_calibration.time_alignment as time_alignment
+
+from end_to_end_common.dataset_loader import csv_row_data_to_transformation
 from end_to_end_common.umeyama import umeyama
 
 
-def csv_row_data_to_transformation(A_p_AB, q_AB_np):
-  """
-  Constructs a proper transformation matrix out of the given translation vector
-  and quaternion.
-
-  Returns: 4x4 transformation matrix.
-  """
-  assert(math.fabs(1.0 - np.linalg.norm(q_AB_np)) < 1e-8)
-  T_AB = np.identity(4)
-  q_AB = Quaternion(q=q_AB_np)
-  R_AB = q_AB.to_rotation_matrix()
-  T_AB[0:3, 0:3] = R_AB
-  T_AB[0:3, 3] = A_p_AB
-  return T_AB
+def get_cumulative_trajectory_length_for_each_point(trajectory):
+    """Returns a list of trajectory lengths up to each point in the trajectory.
+    """
+    assert trajectory.shape[1] == 3
+    num_points = trajectory.shape[0]
+    trajectory_length = np.zeros(num_points)
+    for row_idx in range(1, num_points):
+        delta = np.linalg.norm(trajectory[row_idx, :] -
+                               trajectory[row_idx - 1, :])
+        trajectory_length[row_idx] = trajectory_length[row_idx - 1] + delta
+    return trajectory_length
 
 
-def convert_ground_truth_data_into_target_format(ground_truth_data):
-  # We need to bring the Euroc ground truth data into the format required
-  # by hand-eye calibration.
-  # Convert timestamp ns -> s.
-  ground_truth_data[:, 0] *= 1e-9
-  # Reorder quaternion wxyz -> xyzw.
-  ground_truth_data[:, [4, 5, 6, 7]] = ground_truth_data[:, [5, 6, 7, 4]]
-  # Remove remaining columns.
-  ground_truth_data = ground_truth_data[:, 0:8]
-  return ground_truth_data
+def apply_hand_eye_calibration(trajectory_G_I, marker_calibration_file):
+    """Returns the transformed estimator trajectory.
+
+    Computes the trajectory of the marker frame, given the trajectory if the eye
+    and the hand_eye_calibration output.
+    """
+    assert os.path.isfile(marker_calibration_file)
+    # Frames of reference: M = marker (hand), I = IMU (eye).
+    dq_I_M = ExtrinsicCalibration.fromJson(
+        marker_calibration_file).pose_dq.inverse()
+    trajectory_G_M = trajectory_G_I
+    for idx in range(trajectory_G_M.shape[0]):
+        dq_G_I = DualQuaternion.from_pose_vector(trajectory_G_I[idx, 1:8])
+        dq_G_M = dq_G_I * dq_I_M
+        trajectory_G_M[idx, 1:8] = dq_G_M.to_pose()
+    return trajectory_G_M
 
 
-def align_datasets(
-        estimator_data_G_I_path,
-        ground_truth_data_W_M_path,
-        estimator_input_format="rovioli"):
-  """
-  Sample and align the ground truth trajectory to the estimator trajectory.
+def align_datasets(estimator_data_unaligned_G_I,
+                   ground_truth_data_unaligned_W_M,
+                   estimate_scale,
+                   align_data_to_use_meters=-1,
+                   time_offset=0.0,
+                   marker_calibration_file=None):
+    """Sample and align the estimator trajectory to the ground truth trajectory.
 
-  Input frames:
-      Estimator:      G (Global, from rovioli) --> I (imu, from rovioli)
+    Input:
+      - estimator_data_unaligned_G_I: Unaligned estimator trajectory expressed
+            from global frame G to IMU frame I.
+      - ground_truth_data_unaligned_W_M: Unaligned ground truth data expressed
+            from ground truth world frame W (e.g. Vicon frame) to marker frame M
+            (e.g. Vicon marker). M and I should be at the same position at a
+            given time.
+      - estimate_scale: Estimate a scale factor in addition to the transform
+            and apply it to the aligned estimator trajectory.
+      - align_data_to_use_meters: Only use data points up to a total data length
+            as given by this parameter. If a negative value is given, the
+            entire trajectory is used for the alignment.
+      - time_offset: Indicates the time offset (in seconds) between the data
+            from the bag file and the ground truth data. In the alignment, the
+            estimator data will be shifted by this offset.
+      - marker_calibration_file: Contains the calibration between the marker
+            frame M and the eye frame I. If no file is given, the frames M and I
+            are assumed to be identical.
 
-      Ground truth:   W (Ground truth world, e.g., Vicon frame)
-                       --> M (ground truth marker, e.g., Vicon marker)
-      (M and I should be at the same position at a given time.)
+    Returns:
+        Sampled, aligned and transformed estimator trajectory, sampled ground
+        truth.
+    """
+    if marker_calibration_file:
+        estimator_data_unaligned_G_I = apply_hand_eye_calibration(
+            estimator_data_unaligned_G_I, marker_calibration_file)
+    else:
+        estimator_data_unaligned_G_I = estimator_data_unaligned_G_I
 
-  Returns: aligned estimator trajectory, aligned and sampled ground truth
-  trajectory.
-  Output data frames:
-      Estimator:      G --> I
+    [estimator_data_G_I,
+     ground_truth_data_W_M] = time_alignment.compute_aligned_poses(
+         estimator_data_unaligned_G_I, ground_truth_data_unaligned_W_M,
+         time_offset)
 
-      Ground truth:   G --> M
-      (M and I should be at the same position.)
-  """
-  assert os.path.isfile(estimator_data_G_I_path)
-  assert os.path.isfile(ground_truth_data_W_M_path)
+    # Align trajectories (umeyama).
+    if align_data_to_use_meters < 0.0:
+        umeyama_estimator_data_G_I = estimator_data_G_I[:, 1:4]
+        umeyama_ground_truth_W_M = ground_truth_data_W_M[:, 1:4]
+    else:
+        trajectory_length = get_cumulative_trajectory_length_for_each_point(
+            ground_truth_data_W_M[:, 1:4])
+        align_num_data_points = bisect.bisect_left(trajectory_length,
+                                                   align_data_to_use_meters)
+        umeyama_estimator_data_G_I = estimator_data_G_I[:align_num_data_points,
+                                                        1:4]
+        umeyama_ground_truth_W_M = \
+            ground_truth_data_W_M[:align_num_data_points, 1:4]
 
-  estimator_data_unaligned_G_I = np.zeros((0, 8))
-  if estimator_input_format.lower() == "maplab_console":
-    estimator_data_unaligned_G_I = np.genfromtxt(
-        estimator_data_G_I_path, delimiter=',', skip_header=1)
-    estimator_data_unaligned_G_I = estimator_data_unaligned_G_I[:, 1:9]
-    # Convert timestamp ns -> s.
-    estimator_data_unaligned_G_I[:, 0] *= 1e-9
-  elif estimator_input_format.lower() == "rovioli":
-    # Compute T_G_I from T_G_M and T_G_I
-    estimator_data_raw = np.genfromtxt(
-        estimator_data_G_I_path, delimiter=',', skip_header=1)
-    num_elements = estimator_data_raw.shape[0]
-    estimator_data_unaligned_G_I = np.zeros((num_elements, 8))
-    for i in range(num_elements):
-      estimator_data_unaligned_G_I[i, 0] = estimator_data_raw[i, 0]
+    T_W_G, scale = umeyama(umeyama_estimator_data_G_I.T,
+                           umeyama_ground_truth_W_M.T, estimate_scale)
+    assert T_W_G.shape[0] == 4
+    assert T_W_G.shape[1] == 4
 
-      T_G_M = csv_row_data_to_transformation(
-          estimator_data_raw[i, 1:4], estimator_data_raw[i, 4:8])
-      T_M_I = csv_row_data_to_transformation(
-          estimator_data_raw[i, 8:11], estimator_data_raw[i, 11:15])
-      T_G_M = np.dot(T_G_M, T_M_I)
-      estimator_data_unaligned_G_I[i, 1:4] = T_G_M[0:3, 3]
-      q_G_I = Quaternion.from_rotation_matrix(T_G_M[0:3, 0:3])
-      estimator_data_unaligned_G_I[i, 4:8] = q_G_I.q
-  elif estimator_input_format.lower() == "orbslam":
-    estimator_data_unaligned_G_I = np.genfromtxt(
-        estimator_data_G_I_path, delimiter=' ', skip_header=0)
-    # TODO(eggerk): Check quaternion convention from ORBSLAM.
-  else:
-    print "Unknown estimator input format."
-    print "Valid options are maplab_console, rovioli, orbslam."
-    assert False
+    if estimate_scale:
+        assert scale > 0.0
+        print("Estimator scale:", 1. / scale)
 
-  ground_truth_data_unaligned_W_M = np.genfromtxt(
-      ground_truth_data_W_M_path, delimiter=',', skip_header=1)
-  ground_truth_data_unaligned_W_M = \
-      convert_ground_truth_data_into_target_format(
-          ground_truth_data_unaligned_W_M)
+    estimator_data_G_I_scaled = estimator_data_G_I.copy()
+    estimator_data_G_I_scaled[:, 1:4] *= scale
 
-  # This is needed for the alignment and sampling. It indicates the time offset
-  # between the data from Rovioli/from the bag file and the ground truth data.
-  # In the case of the Euroc datasets, this is 0 as they image/imu data and
-  # ground truth is already synchronized.
-  time_offset = 0
-  [ground_truth_data_W_M, estimator_data_G_I] = \
-      time_alignment.compute_aligned_poses(
-          ground_truth_data_unaligned_W_M, estimator_data_unaligned_G_I,
-          time_offset)
+    ground_truth_data_G_M_aligned = ground_truth_data_W_M.copy()
 
-  # Create a matrix of the right size to store aligned trajectory.
-  ground_truth_data_aligned_G_M = ground_truth_data_W_M
+    num_data_points = ground_truth_data_W_M.shape[0]
+    for index in range(num_data_points):
+        # Get transformation matrix from quaternion (normalized) and position.
+        T_ground_truth_W_M = csv_row_data_to_transformation(
+            ground_truth_data_W_M[index, 1:4],
+            ground_truth_data_W_M[index, 4:8] / np.linalg.norm(
+                ground_truth_data_W_M[index, 4:8]))
+        # Apply found calibration between G and M frame.
+        T_ground_truth_G_M = np.dot(np.linalg.inv(T_W_G), T_ground_truth_W_M)
+        # Extract quaternion and position.
+        q_ground_truth_G_M = Quaternion.from_rotation_matrix(
+            T_ground_truth_G_M[0:3, 0:3])
+        ground_truth_data_G_M_aligned[index, 4:8] = q_ground_truth_G_M.q
+        ground_truth_data_G_M_aligned[index, 1:4] = T_ground_truth_G_M[0:3, 3]
 
-  # Align trajectories (umeyama).
-  R_G_W, t_G_W, scale = umeyama(
-      ground_truth_data_W_M[:, 1:4].T, estimator_data_G_I[:, 1:4].T)
-  T_G_W = np.identity(4)
-  T_G_W[0:3, 0:3] = R_G_W
-  T_G_W[0:3, 3] = t_G_W
-  if abs(1 - scale) < 1e-8:
-    print "WARNING: Scale is not 1, but", scale, "\b."
-
-  num_data_points = estimator_data_G_I.shape[0]
-  for index in range(num_data_points):
-    # Create transformations to compare.
-    T_ground_truth_G_M = np.dot(T_G_W, csv_row_data_to_transformation(
-        ground_truth_data_W_M[index, 1:4],
-        ground_truth_data_W_M[index, 4:8] /
-            np.linalg.norm(ground_truth_data_W_M[index, 4:8])))
-    ground_truth_data_aligned_G_M[index, 1:4] = T_ground_truth_G_M[0:3, 3]
-    q_ground_truth_G_M = Quaternion.from_rotation_matrix(
-        T_ground_truth_G_M[0:3, 0:3])
-    ground_truth_data_aligned_G_M[index, 4:8] = q_ground_truth_G_M.q
-
-  return estimator_data_G_I, ground_truth_data_aligned_G_M
+    return estimator_data_G_I_scaled, ground_truth_data_G_M_aligned

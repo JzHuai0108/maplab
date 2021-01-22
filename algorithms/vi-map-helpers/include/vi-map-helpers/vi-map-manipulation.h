@@ -3,6 +3,8 @@
 
 #include <stddef.h>
 
+#include <unordered_map>
+
 #include <posegraph/unique-id.h>
 
 #include "vi-map-helpers/vi-map-geometry.h"
@@ -24,6 +26,7 @@ class VIMapManipulation {
   // GLOBAL MAP OPERATIONS
   // =====================
   void rotate(const size_t dimension, const double degrees);
+  void artificiallyDisturbVertices();
 
   // =============
   // MISSION ID IN
@@ -70,6 +73,9 @@ class VIMapManipulation {
   // observation, you should pass in the vertices in order.
   size_t initializeLandmarksFromUnusedFeatureTracksOfMission(
       const vi_map::MissionId& mission_id);
+  size_t initializeLandmarksFromUnusedFeatureTracksOfMission(
+      const vi_map::MissionId& mission_id,
+      const pose_graph::VertexId& starting_vertex_id);
   void initializeLandmarksFromUnusedFeatureTracksOfOrderedVertices(
       const pose_graph::VertexIdList& ordered_vertex_ids,
       TrackIndexToLandmarkIdMap* trackid_landmarkid_map);
@@ -87,6 +93,31 @@ class VIMapManipulation {
 
   // Remove all landmarks from the map that are flagged as bad.
   size_t removeBadLandmarks();
+
+  // This function will remove all vertices and data before the new root vertex.
+  // The intended use case is to seriallize the current map state and then drop
+  // everything except the latest vertex.
+  // NOTE: currently only tested when calling it with the last vertex of the
+  // mission as new root vertex.
+  void dropMapDataBeforeVertex(
+      const vi_map::MissionId& mission_id,
+      const pose_graph::VertexId& new_root_vertex,
+      const bool delete_resources_from_file_system);
+
+  // Adds TransformationEdges of type kOdometry between vertices
+  // that have fewer common landmarks than 'min_number_of_common_landmarks'. If
+  // the threshold is set to 0, we add odometry edges between all vertices.
+  uint32_t addOdometryEdgesBetweenVertices(
+      const uint32_t min_number_of_common_landmarks = 0u);
+
+  // If a (sub-)map is not moving at all, landmarks sometimes fail to constrain
+  // the position, which leads to the vertices drifting away or rotating on the
+  // spot, even when constrained with 6DoF odometry edges. This measure can be
+  // justified by the fact that most laser and vision based odometry can perform
+  // a drift-free re-localization against local geometry/features if the robot
+  // does not move.
+  bool constrainStationarySubmapWithLoopClosureEdge(
+      const double max_translation_m, const double max_rotation_m);
 
  private:
   vi_map::VIMap& map_;

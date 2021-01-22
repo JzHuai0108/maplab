@@ -2,7 +2,6 @@
 
 #include <aslam-serialization/visual-frame-serialization.h>
 #include <aslam/cameras/ncamera.h>
-#include <maplab-common/aslam-id-proto.h>
 #include <maplab-common/eigen-proto.h>
 
 #include "vio-common/vio-types.h"
@@ -49,6 +48,7 @@ void serializeVioUpdate(
 
   // Serialize ViNodeState, field 5.
   vio::proto::ViNodeState* vinode_proto = proto->mutable_vinode();
+  vinode_proto->set_timestamp_ns(update.vinode.getTimestamp());
   common::eigen_proto::serialize(update.vinode.get_T_M_I(),
                                  vinode_proto->mutable_t_w_b());
   common::eigen_proto::serialize(update.vinode.get_v_M_I(),
@@ -110,6 +110,9 @@ void deserializeVioUpdate(
   CHECK(proto.has_vinode());
   vio::proto::ViNodeState vinode_proto = proto.vinode();
 
+  CHECK(vinode_proto.has_timestamp_ns());
+  update->vinode.setTimestamp(vinode_proto.timestamp_ns());
+
   aslam::Transformation T_M_I = update->vinode.get_T_M_I();
   common::eigen_proto::deserialize(vinode_proto.t_w_b(), &T_M_I);
   update->vinode.set_T_M_I(T_M_I);
@@ -127,7 +130,7 @@ void deserializeVioUpdate(
   update->vinode.setGyroBias(gyro_bias);
 
   update->localization_state =
-      static_cast<vio::LocalizationState>(proto.localization_state());
+      static_cast<common::LocalizationState>(proto.localization_state());
 
   common::eigen_proto::deserialize(proto.t_g_m(), &update->T_G_M);
 }
